@@ -23,7 +23,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180  # 3小时超时保护
+    timeout-minutes: 240  # 4小时超时保护
 
     steps:
     - name: Check machine configuration
