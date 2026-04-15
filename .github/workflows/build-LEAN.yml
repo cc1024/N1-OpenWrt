@@ -23,7 +23,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # 6小时超时保护
+    timeout-minutes: 330
 
     steps:
     - name: Check machine configuration
@@ -111,8 +111,6 @@ jobs:
     - name: SSH connection to Actions (Debug)
       uses: P3TERX/ssh2actions@main
       if: github.event.inputs.ssh == 'true'
-      with:
-        password: ''
 
     - name: Download package
       working-directory: ./openwrt
@@ -120,14 +118,12 @@ jobs:
         make defconfig
         echo "Downloading packages..."
         make download -j4
-        # 检查并删除无效的下载文件
         find dl -size -1024c -exec rm -f {} \;
         echo "Package download completed"
 
     - name: Compile the firmware
       run: |
         cd openwrt
-        # 获取CPU核心数并限制并行任务
         TOTAL_CORES=$(nproc)
         if [ $TOTAL_CORES -gt 2 ]; then
           JOBS=2
@@ -141,19 +137,21 @@ jobs:
         echo "并行任务数: $JOBS"
         echo "=========================================="
         
-        # 尝试编译，失败时降级到单任务并输出详细日志
         make -j$JOBS || make -j1 V=s
         
-        if [ -f bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz ]; then
+        # 检查编译结果
+        if ls openwrt/bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz 2>/dev/null; then
           echo "compile_status=success" >> $GITHUB_ENV
-          echo "编译成功！"
+          echo "✅ 编译成功"
+          echo "编译产物列表:"
+          ls -la openwrt/bin/targets/*/*/
         else
           echo "compile_status=failed" >> $GITHUB_ENV
-          echo "编译失败，请检查日志"
+          echo "❌ 编译失败"
           exit 1
         fi
 
-    - name: Package OpenWrt Firmware
+    - name: Package firmware for N1
       if: env.compile_status == 'success'
       uses: unifreq/openwrt_packit@master
       env:
@@ -164,14 +162,53 @@ jobs:
         WHOAMI: fightroad
         SW_FLOWOFFLOAD: 1
         SFE_FLOW: 0
-       
-    - name: Set packaged status
+
+    - name: Verify and set package status
       if: env.compile_status == 'success'
       run: |
-        echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
-        echo "PACKAGED_OUTPUTDATE=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
+        echo "检查打包产物..."
+        
+        # 检查多个可能的路径
+        if [ -d "/opt/openwrt_packit/output" ]; then
+          echo "找到打包目录:"
+          ls -la /opt/openwrt_packit/output/
+          
+          FILE_COUNT=$(ls -1 /opt/openwrt_packit/output/*.img* 2>/dev/null | wc -l)
+          if [ $FILE_COUNT -gt 0 ]; then
+            echo "✅ 打包成功，找到 $FILE_COUNT 个固件文件"
+            echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
+            echo "PACKAGED_OUTPUTDATE=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
+          else
+            echo "⚠️ 打包目录存在但没有固件文件"
+            echo "尝试查找编译目录中的固件..."
+            find openwrt/bin/targets/ -name "*.img*" -o -name "*.gz" | head -10
+          fi
+        else
+          echo "❌ 打包目录不存在: /opt/openwrt_packit/output"
+          echo "尝试查找编译目录中的固件作为备选..."
+          find openwrt/bin/targets/ -name "*.img*" -o -name "*.gz" | head -10
+          
+          # 如果编译目录中有固件，直接使用
+          if ls openwrt/bin/targets/*/*/openwrt-*.img.gz 2>/dev/null; then
+            echo "找到编译目录中的固件，将直接上传"
+            mkdir -p /opt/openwrt_packit/output/
+            cp openwrt/bin/targets/*/*/openwrt-*.img* /opt/openwrt_packit/output/
+            echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
+            echo "PACKAGED_OUTPUTDATE=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
+          elif ls openwrt/bin/targets/*/*/*.tar.gz 2>/dev/null; then
+            echo "找到编译目录中的 tar.gz 文件，将直接上传"
+            mkdir -p /opt/openwrt_packit/output/
+            cp openwrt/bin/targets/*/*/*.tar.gz /opt/openwrt_packit/output/
+            echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
+            echo "PACKAGED_OUTPUTDATE=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
+          else
+            echo "❌ 编译目录中也没有找到固件文件"
+            echo "openwrt/bin/targets/ 目录内容:"
+            ls -la openwrt/bin/targets/ 2>/dev/null || echo "目录不存在"
+          fi
+        fi
 
-    - name: Upload OpenWrt Firmware to Release
+    - name: Upload firmware to Release
       uses: ncipollo/release-action@main
       if: env.PACKAGED_STATUS == 'success'
       with:
@@ -180,7 +217,7 @@ jobs:
         allowUpdates: true
         token: ${{ secrets.GITHUB_TOKEN }}
         body: |
-          ## N1 OpenWRT 固件自动编译
+          ## N1 OpenWRT 固件
           
           ### 固件信息
           - 基于 Lean's LEDE 源码编译
@@ -188,21 +225,47 @@ jobs:
           - 内核版本：${{ github.event.inputs.kernel_version || '5.15.176' }}
           - 编译时间：${{ env.PACKAGED_OUTPUTDATE }}
           
-          ### 使用说明
+          ### 默认设置
           - **IP地址**: 192.168.2.2
           - **用户名**: root
           - **密码**: password
           
-          ### 注意事项
+          ### 使用说明
           - 首次使用建议全新刷写
-          - 如遇问题请检查配置是否正确
+          - 下载后解压得到刷机镜像
           
           ### 编译状态
           - ✅ 编译成功
           - 📦 已打包为可刷写镜像
-          
+
+    # 备选方案1：如果 Release 上传失败，保存为 Artifact
+    - name: Fallback - Save as Artifact
+      if: failure() && env.compile_status == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-firmware-${{ github.run_number }}
+        path: |
+          /opt/openwrt_packit/output/*.img*
+          openwrt/bin/targets/*/*/*.img*
+          openwrt/bin/targets/*/*/*.tar.gz
+        retention-days: 90
+        
+    # 备选方案2：如果打包完全失败，至少保存编译日志
+    - name: Fallback - Save build logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-build-logs-${{ github.run_number }}
+        path: |
+          openwrt/logs/
+          openwrt/.config
+          openwrt/bin/targets/*/*/*.log
+          openwrt/build_dir/*/.configured_*
+        retention-days: 7
+        
     - name: Delete old releases
       uses: dev-drprasad/delete-older-releases@master
+      if: env.PACKAGED_STATUS == 'success'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -210,27 +273,23 @@ jobs:
         delete_tags: true
         delete_tag_pattern: 'OpenWrt_N1_*'
         
-    - name: Upload debug logs (if failed)
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-build-logs
-        path: |
-          openwrt/logs/
-          openwrt/.config
-          openwrt/bin/targets/*/*/*.log
-        retention-days: 7
-        
     - name: Build summary
       if: always()
       run: |
         echo "=========================================="
         if [ "${{ env.compile_status }}" = "success" ]; then
-          echo "✅ N1 OpenWRT 固件编译成功！"
-          echo "📦 固件已上传到 Releases"
-          echo "=========================================="
+          if [ "${{ env.PACKAGED_STATUS }}" = "success" ]; then
+            echo "✅ N1 OpenWRT 固件编译并打包成功！"
+            echo "📦 固件已上传到 Releases"
+          else
+            echo "⚠️ 编译成功但打包失败"
+            echo "📁 固件文件已保存到 Artifacts"
+          fi
         else
           echo "❌ N1 OpenWRT 固件编译失败"
           echo "📁 调试日志已保存，请检查"
-          echo "=========================================="
         fi
+        echo "=========================================="
+        echo "编译时间: $(date)"
+        echo "运行编号: ${{ github.run_number }}"
+        echo "=========================================="
