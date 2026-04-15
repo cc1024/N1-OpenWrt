@@ -144,6 +144,28 @@ jobs:
           find bin/targets/ -name "*.gz" -o -name "*.img" 2>/dev/null || echo "没有找到任何固件"
           exit 1
         fi
+    - name: Free space before packaging
+      run: |
+        echo "=========================================="
+        echo "打包前清理磁盘空间"
+        echo "=========================================="
+        df -h /
+    
+        # 删除编译中间文件（保留最终的固件）
+        cd openwrt
+        rm -rf build_dir/*
+        rm -rf staging_dir/*
+        rm -rf tmp/*
+        rm -rf .ccache/*
+    
+        # 删除不需要的下载缓存
+        rm -rf dl/*.tar.* 2>/dev/null || true
+    
+        # 清理日志文件
+        rm -rf logs/*.log 2>/dev/null || true
+    
+        echo "清理后可用空间："
+        df -h /
 
     - name: Package firmware for N1
       if: env.compile_status == 'success'
